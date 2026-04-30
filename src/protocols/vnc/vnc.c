@@ -139,6 +139,8 @@ rfbClient* guac_vnc_get_client(guac_client* client) {
 
     /* Framebuffer update handler */
     rfb_client->GotFrameBufferUpdate = guac_vnc_update;
+    /* Framebuffer finished frame handler */
+    rfb_client->FinishedFrameBufferUpdate = guac_vnc_finished_frame;
     vnc_client->rfb_GotCopyRect = rfb_client->GotCopyRect;
     rfb_client->GotCopyRect = guac_vnc_copyrect;
 
