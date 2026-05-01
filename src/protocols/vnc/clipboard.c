@@ -29,6 +29,7 @@
 #include <guacamole/stream.h>
 #include <guacamole/user.h>
 #include <rfb/rfbclient.h>
+#include <rfb/rfbconfig.h>
 #include <rfb/rfbproto.h>
 
 int guac_vnc_set_clipboard_encoding(guac_client* client,
@@ -103,6 +104,35 @@ int guac_vnc_clipboard_end_handler(guac_user* user, guac_stream* stream) {
     guac_vnc_client* vnc_client = (guac_vnc_client*) user->client->data;
     rfbClient* rfb_client = vnc_client->rfb_client;
 
+    /* Send via VNC only if finished connecting */
+    if (rfb_client == NULL)
+        return 0;
+
+    /*
+     * Guacamole stores clipboard text as UTF-8. The clipboard-encoding
+     * setting only applies to the classic VNC clipboard path, where text
+     * must be converted from UTF-8 to the configured wire encoding.
+     *
+     * If clipboard-encoding is UTF-8, try the Extended Clipboard  path first
+     * since it can send UTF-8 directly. Otherwise, or if that fails, fall
+     * back to classic clipboard conversion.
+     *
+     * Text coming back from the VNC server follows the same idea in reverse:
+     * classic clipboard text is decoded using clipboard-encoding, while
+     * Extended Clipboard text is already UTF-8.
+     */
+
+    const char* clipboard_encoding = vnc_client->settings->clipboard_encoding;
+    int use_utf8_clipboard = clipboard_encoding != NULL &&
+        strcmp(clipboard_encoding, "UTF-8") == 0;
+
+    if (use_utf8_clipboard) {
+        if (SendClientCutTextUTF8(rfb_client, vnc_client->clipboard->buffer,
+                    vnc_client->clipboard->length))
+            return 0;
+    }
+
+    /* Fall back to classic clipboard with encoding conversion */
     char output_data[GUAC_COMMON_CLIPBOARD_MAX_LENGTH];
 
     const char* input = vnc_client->clipboard->buffer;
@@ -113,9 +143,7 @@ int guac_vnc_clipboard_end_handler(guac_user* user, guac_stream* stream) {
     guac_iconv(GUAC_READ_UTF8, &input, vnc_client->clipboard->length,
                writer, &output, sizeof(output_data));
 
-    /* Send via VNC only if finished connecting */
-    if (rfb_client != NULL)
-        SendClientCutText(rfb_client, output_data, output - output_data);
+    SendClientCutText(rfb_client, output_data, output - output_data);
 
     return 0;
 }
@@ -146,3 +174,29 @@ void guac_vnc_cut_text(rfbClient* client, const char* text, int textlen) {
 
 }
 
+void guac_vnc_cut_text_utf8(rfbClient* client, const char* text, int textlen) {
+
+    guac_client* gc = rfbClientGetClientData(client, GUAC_VNC_CLIENT_KEY);
+    guac_vnc_client* vnc_client = (guac_vnc_client*) gc->data;
+
+    /* Ignore received text if outbound clipboard transfer is disabled */
+    if (vnc_client->settings->disable_copy)
+        return;
+
+    char received_data[GUAC_COMMON_CLIPBOARD_MAX_LENGTH];
+
+    const char* input = text;
+    char* output = received_data;
+
+    /* Extended clipboard always delivers UTF-8; iconv() here enforces
+     * GUAC_COMMON_CLIPBOARD_MAX_LENGTH and replaces invalid lead bytes
+     * with the Unicode replacement character (U+FFFD, ?) */
+    guac_iconv(GUAC_READ_UTF8, &input, textlen,
+               GUAC_WRITE_UTF8, &output, sizeof(received_data));
+
+    /* Send converted data */
+    guac_common_clipboard_reset(vnc_client->clipboard, "text/plain");
+    guac_common_clipboard_append(vnc_client->clipboard, received_data, output - received_data);
+    guac_common_clipboard_send(vnc_client->clipboard, gc);
+
+}
